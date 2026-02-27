@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Phase Shift Operator</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="wrap standby" id="wrap">
+      <header class="top">
+        <div class="title">
+          <h1>Phase Shift Operator</h1>
+          <p class="sub">BenjiMada Harmonic Field Device · Generation II</p>
+        </div>
+      </header>
+
+      <section class="stage">
+        <svg
+          id="operator"
+          class="operator"
+          viewBox="0 0 300 300"
+          role="img"
+          aria-label="Interactive harmonic field operator"
+        >
+          <defs>
+            <clipPath id="fieldClip">
+              <circle cx="150" cy="150" r="120"></circle>
+            </clipPath>
+
+            <radialGradient id="fieldGradient" cx="50%" cy="45%" r="70%">
+              <stop offset="0%" stop-color="#ffffff" stop-opacity="0.18"></stop>
+              <stop offset="100%" stop-color="#ffffff" stop-opacity="0"></stop>
+            </radialGradient>
+          </defs>
+
+          <!-- Base fill -->
+          <circle cx="150" cy="150" r="120" class="field-fill"></circle>
+
+          <!-- Highlight overlay -->
+          <circle
+            cx="150"
+            cy="150"
+            r="120"
+            fill="url(#fieldGradient)"
+            clip-path="url(#fieldClip)"
+          ></circle>
+
+          <!-- Precision rings -->
+          <circle cx="150" cy="150" r="92" class="field-ring subtle"></circle>
+          <circle cx="150" cy="150" r="64" class="field-ring subtle"></circle>
+
+          <!-- Core node (interactive hit area) -->
+          <circle
+            cx="150"
+            cy="150"
+            r="34"
+            class="field-core"
+            data-hit="core"
+          ></circle>
+
+          <!-- Outer boundary -->
+          <circle cx="150" cy="150" r="120" class="field-ring outer"></circle>
+
+          <!-- Stress sheen (opacity driven by JS) -->
+          <circle
+            cx="150"
+            cy="150"
+            r="120"
+            class="stress-sheen"
+            clip-path="url(#fieldClip)"
+            id="stressSheen"
+          ></circle>
+        </svg>
+
+        <div class="stateReadout mono" id="stateReadout">FIELD STABLE</div>
+
+        <div class="controlStrip">
+          <div class="status mono" id="status">STANDBY</div>
+
+          <button id="enterBtn" class="primary">Enter</button>
+          <button id="playPauseBtn" class="ghost" disabled>Play</button>
+
+          <div class="hint">
+            Touch field to introduce phase stress.
+            <br />
+            If agent is using EYEPhone, switch Silent Mode off.
+          </div>
+        </div>
+      </section>
+
+      <footer class="foot">
+        <div class="small mono" id="now">Loop: MASS · 00:30</div>
+        <div class="spec mono" id="spec">
+          PHASE NODE:
+          <a href="https://liberandos.com" target="_blank" rel="noopener" class="la5">LA5</a>
+          · MODE: DRIFT · STATUS: STANDBY
+        </div>
+      </footer>
+    </main>
+
+    <script src="player.js"></script>
+  </body>
+</html>
