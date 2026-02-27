@@ -1,5 +1,7 @@
 // player.js — Phase Shift Operator
 // One looped stem (Mass). Subtle autonomous drift + obvious temporary "stress" on interaction.
+// Fixes brightening over time by damping the delay feedback loop.
+// Makes interaction more unstable: motion shock + flutter + pitch wobble + stronger drive.
 
 const FILE = "audio/mass.m4a";
 
@@ -18,25 +20,36 @@ const BASE = {
   width: 0.92, // 1 = fully stereo, 0 = mono
 };
 
+// Delay damping (prevents runaway brightness / harshness)
+const ECHO_DAMP = {
+  hpHz: 140,
+  lpHzBase: 2200,
+  lpHzMin: 900, // stress pushes it darker
+};
+
 // Stress tuning (added on top when user interacts)
 const STRESS = {
-  // At stress=1:
-  highpassAddHz: 1200,
-  lowpassMul: 0.45,     // reduce LP
-  wetAdd: 0.22,
-  feedbackAdd: 0.18,
-  driveAdd: 0.12,
-  widthTarget: 0.12,    // collapse close to mono
-  sheenMax: 0.55,       // UI glow
+  highpassAddHz: 1600,
+  lowpassMul: 0.35,
+  wetAdd: 0.32,
+  feedbackAdd: 0.20,
+  driveAdd: 0.18,
+  widthTarget: 0.06,
+  sheenMax: 0.70,
+
+  // new instability
+  pitchCentsMax: 18,      // +/- cents
+  delayJitterMsMax: 18,   // +/- ms
+  motionKickMax: 0.55,    // extra stress from fast movement
 };
 
 // Drift (autonomous)
 const DRIFT = {
-  lpDepthHz: 700,         // +/- around base
-  lpPeriodSec: 52,        // slow sweep
-  widthDepth: 0.06,       // small breathing
+  lpDepthHz: 700,
+  lpPeriodSec: 52,
+  widthDepth: 0.06,
   widthPeriodSec: 36,
-  delayWarbleMs: 6,       // +/- ms
+  delayWarbleMs: 6,
   delayWarblePeriodSec: 11,
 };
 
@@ -48,12 +61,16 @@ let source = null;
 let isReady = false;
 let isPlaying = false;
 
-let nodes = null; // graph nodes
+let nodes = null;
 let driftTimers = null;
 
-let stress = 0;          // smoothed current stress 0..1
-let stressTarget = 0;    // target stress from pointer
+let stress = 0;
+let stressTarget = 0;
 let rafId = null;
+
+// velocity shock state
+let lastPtr = null;   // {x,y,t}
+let motionKick = 0;   // 0..~0.55
 
 // UI
 const statusEl = document.getElementById("status");
@@ -125,29 +142,16 @@ function buildGraph() {
   master.connect(audioCtx.destination);
 
   // Stereo -> Mono crossfade
-  // stereoPath: postFX stereo as-is
   const stereoGain = audioCtx.createGain();
   const monoGain = audioCtx.createGain();
 
   // Split + sum to mono
   const splitter = audioCtx.createChannelSplitter(2);
   const merger = audioCtx.createChannelMerger(2);
-  const monoSum = audioCtx.createGain(); // sums inputs
+  const monoSum = audioCtx.createGain();
 
   const lHalf = audioCtx.createGain(); lHalf.gain.value = 0.5;
   const rHalf = audioCtx.createGain(); rHalf.gain.value = 0.5;
-
-  // Route for mono sum:
-  // splitter.L -> 0.5 -> monoSum
-  // splitter.R -> 0.5 -> monoSum
-  // monoSum -> both merger channels
-  // Note: a GainNode sums multiple connections automatically.
-  // Connections:
-  //   src -> splitter
-  //   splitter[0] -> lHalf -> monoSum
-  //   splitter[1] -> rHalf -> monoSum
-  //   monoSum -> merger[0] and merger[1]
-  // Done later when source exists.
 
   // FX chain (shared pre width mix)
   const highpass = audioCtx.createBiquadFilter();
@@ -160,7 +164,7 @@ function buildGraph() {
   lowpass.frequency.value = BASE.lowpassHz;
   lowpass.Q.value = 0.7;
 
-  // Delay send bus (simple)
+  // Delay send bus
   const delay = audioCtx.createDelay(1.0);
   delay.delayTime.value = BASE.delayTime;
 
@@ -173,28 +177,35 @@ function buildGraph() {
   const dryGain = audioCtx.createGain();
   dryGain.gain.value = 1.0;
 
-  // Drive on wet only (keeps it “present but not crunchy”)
+  // Damping filters INSIDE the feedback loop (prevents runaway brightness)
+  const echoHP = audioCtx.createBiquadFilter();
+  echoHP.type = "highpass";
+  echoHP.frequency.value = ECHO_DAMP.hpHz;
+  echoHP.Q.value = 0.7;
+
+  const echoLP = audioCtx.createBiquadFilter();
+  echoLP.type = "lowpass";
+  echoLP.frequency.value = ECHO_DAMP.lpHzBase;
+  echoLP.Q.value = 0.7;
+
+  // Drive on wet only
   const shaper = audioCtx.createWaveShaper();
   shaper.curve = makeSoftClipCurve(BASE.drive);
   shaper.oversample = "2x";
 
-  // feedback loop
-  delay.connect(feedback);
+  // feedback loop WITH damping:
+  // delay -> echoHP -> echoLP -> feedback -> delay
+  delay.connect(echoHP);
+  echoHP.connect(echoLP);
+  echoLP.connect(feedback);
   feedback.connect(delay);
 
-  // Wet chain
-  delay.connect(shaper);
+  // wet taps after damping
+  echoLP.connect(shaper);
   shaper.connect(wetGain);
-
-  // Dry chain
-  // (dryGain just passes the filtered signal)
-  // Both dry and wet feed the width mixer.
-  // We'll connect filtered signal to dryGain and also to delay.
 
   // Width mixer output
   const widthOut = audioCtx.createGain();
-
-  // stereoGain + monoGain -> widthOut -> master
   stereoGain.connect(widthOut);
   monoGain.connect(widthOut);
   widthOut.connect(master);
@@ -212,9 +223,11 @@ function buildGraph() {
     // filters
     highpass,
     lowpass,
-    // delay
+    // delay + damping
     delay,
     feedback,
+    echoHP,
+    echoLP,
     wetGain,
     dryGain,
     shaper,
@@ -234,20 +247,17 @@ function buildSource() {
   s.loopStart = 0;
   s.loopEnd = buffer.duration;
 
-  // Wire: source -> filters -> dry+delay -> (dryGain and wetGain) -> width mixer
-  // Pre-FX stage:
+  // source -> filters
   s.connect(nodes.highpass);
   nodes.highpass.connect(nodes.lowpass);
 
-  // filtered signal taps
+  // filtered taps
   nodes.lowpass.connect(nodes.dryGain);
   nodes.lowpass.connect(nodes.delay);
 
   // dry path into width mixer (stereo + mono)
-  // For stereo: dryGain -> stereoGain
   nodes.dryGain.connect(nodes.stereoGain);
 
-  // For mono: dryGain -> splitter -> monoSum -> merger -> monoGain
   nodes.dryGain.connect(nodes.splitter);
   nodes.splitter.connect(nodes.lHalf, 0);
   nodes.splitter.connect(nodes.rHalf, 1);
@@ -257,7 +267,7 @@ function buildSource() {
   nodes.monoSum.connect(nodes.merger, 0, 1);
   nodes.merger.connect(nodes.monoGain);
 
-  // wet path into width mixer (wet stays stereo; mono will be derived from dry only)
+  // wet stays stereo (mono derived from dry)
   nodes.wetGain.connect(nodes.stereoGain);
 
   source = s;
@@ -288,8 +298,6 @@ function togglePlay() {
 }
 
 function setWidth(w) {
-  // Crossfade between stereo (1) and mono (0)
-  // keep power-ish consistency (not perfect, but stable)
   nodes.stereoGain.gain.value = clamp01(w);
   nodes.monoGain.gain.value = clamp01(1 - w);
 }
@@ -307,6 +315,7 @@ function onPointerMove(e) {
 }
 function onPointerUp() {
   stressTarget = 0;
+  lastPtr = null;
 }
 
 function updateStressFromPointer(e) {
@@ -317,21 +326,28 @@ function updateStressFromPointer(e) {
   const dx = (e.clientX - cx) / (rect.width / 2);
   const dy = (e.clientY - cy) / (rect.height / 2);
 
-  const r = Math.sqrt(dx*dx + dy*dy);
+  const r = Math.sqrt(dx * dx + dy * dy);
 
-  // Inside circle: r ~ 0..1. Clamp.
-  // Stress is stronger near center (more “dangerous”).
+  // stronger near center
   const inside = clamp01(1 - r);
-  const shaped = Math.pow(inside, 0.7);
+  const shaped = Math.pow(inside, 0.65);
 
-  stressTarget = shaped;
+  // velocity-based kick
+  const now = performance.now();
+  if (lastPtr) {
+    const dt = Math.max(8, now - lastPtr.t);
+    const vx = (e.clientX - lastPtr.x) / dt;
+    const vy = (e.clientY - lastPtr.y) / dt;
+    const v = Math.sqrt(vx * vx + vy * vy); // px/ms
 
-  // UI readout becomes more explicit under stress
-  if (shaped > 0.06) {
-    stateReadoutEl.textContent = "PHASE STRESS";
-  } else {
-    stateReadoutEl.textContent = "FIELD STABLE";
+    const kick = clamp01((v - 0.10) / 0.55);
+    motionKick = Math.max(motionKick, kick * STRESS.motionKickMax);
   }
+  lastPtr = { x: e.clientX, y: e.clientY, t: now };
+
+  stressTarget = clamp01(shaped + motionKick);
+
+  stateReadoutEl.textContent = (stressTarget > 0.08) ? "PHASE STRESS" : "FIELD STABLE";
 }
 
 // Smooth stress loop (visual + audio)
@@ -343,28 +359,49 @@ function startStressLoop() {
 
     // Smooth approach
     stress += (stressTarget - stress) * 0.10;
-
-    // Apply stress to parameters
     const s = clamp01(stress);
 
-    // Filters
+    // decay motionKick over time (shock fades)
+    motionKick *= 0.92;
+    if (motionKick < 0.001) motionKick = 0;
+
+    // Filters (more dramatic)
     const hp = BASE.highpassHz + STRESS.highpassAddHz * s;
     const lp = Math.max(250, BASE.lowpassHz * (1 - (1 - STRESS.lowpassMul) * s));
 
     smoothParam(nodes.highpass.frequency, hp);
     smoothParam(nodes.lowpass.frequency, lp);
 
-    // Delay / feedback / wet
-    smoothParam(nodes.feedback.gain, BASE.feedback + STRESS.feedbackAdd * s);
-    smoothParam(nodes.wetGain.gain, BASE.wet + STRESS.wetAdd * s);
+    // Dampen echo more as stress increases (keeps it controlled + "archival")
+    const echoLp = lerp(ECHO_DAMP.lpHzBase, ECHO_DAMP.lpHzMin, s);
+    smoothParam(nodes.echoLP.frequency, echoLp);
 
-    // Drive curve update (cheap enough at this rate because it’s small)
+    // Delay / feedback / wet (bounded)
+    smoothParam(nodes.feedback.gain, clamp(BASE.feedback + STRESS.feedbackAdd * s, 0, 0.35));
+    smoothParam(nodes.wetGain.gain, clamp(BASE.wet + STRESS.wetAdd * s, 0, 0.55));
+
+    // Delay-time jitter under stress (flutter)
+    const jit = (Math.sin(audioCtx.currentTime * 10.7) + Math.sin(audioCtx.currentTime * 6.3)) * 0.5;
+    const jitterSec = (jit * STRESS.delayJitterMsMax * s) / 1000;
+    const dt = clamp(BASE.delayTime + jitterSec, 0.015, 0.12);
+    smoothParam(nodes.delay.delayTime, dt);
+
+    // Drive update (stronger response)
     const drive = BASE.drive + STRESS.driveAdd * s;
     nodes.shaper.curve = makeSoftClipCurve(drive);
 
     // Width collapse
     const w = lerp(BASE.width, STRESS.widthTarget, s);
     setWidth(w);
+
+    // Pitch wobble (playbackRate) under stress
+    if (source) {
+      const centsMax = STRESS.pitchCentsMax * s;
+      const wob = Math.sin(audioCtx.currentTime * 3.1) * 0.6 + Math.sin(audioCtx.currentTime * 5.0) * 0.4;
+      const centsNow = wob * centsMax;
+      const rate = Math.pow(2, centsNow / 1200);
+      source.playbackRate.setTargetAtTime(rate, audioCtx.currentTime, 0.03);
+    }
 
     // UI sheen
     if (sheenEl) sheenEl.style.opacity = String(STRESS.sheenMax * s);
@@ -385,7 +422,6 @@ function smoothParam(param, value) {
 // Autonomous drift
 function startDrift() {
   stopDrift();
-
   const tStart = audioCtx.currentTime;
 
   const driftTick = () => {
@@ -395,7 +431,8 @@ function startDrift() {
 
     // Lowpass drift (slow)
     const lp = BASE.lowpassHz + Math.sin((2 * Math.PI * t) / DRIFT.lpPeriodSec) * DRIFT.lpDepthHz;
-    // Delay time warble (tiny, in seconds)
+
+    // Delay warble (idle subtle)
     const warble = (Math.sin((2 * Math.PI * t) / DRIFT.delayWarblePeriodSec) * DRIFT.delayWarbleMs) / 1000;
     const dt = clamp(BASE.delayTime + warble, 0.01, 0.12);
 
@@ -403,14 +440,13 @@ function startDrift() {
     const wb = Math.sin((2 * Math.PI * t) / DRIFT.widthPeriodSec) * DRIFT.widthDepth;
     const width = clamp01(BASE.width + wb);
 
-    // Only apply drift gently (stress loop will overwrite with ramps anyway)
-    // We set base values via smoothParam to keep movement subtle.
     smoothParam(nodes.lowpass.frequency, lp);
-    smoothParam(nodes.delay.delayTime, dt);
-    // Width is handled by setWidth directly (no AudioParam)
+
+    // only apply idle warble when not stressed
+    if (stress < 0.02) smoothParam(nodes.delay.delayTime, dt);
     if (stress < 0.02) setWidth(width);
 
-    driftTimers = setTimeout(driftTick, 600); // slow control rate
+    driftTimers = setTimeout(driftTick, 600);
   };
 
   driftTick();
@@ -434,10 +470,10 @@ function lerp(a, b, t) {
 }
 
 function makeSoftClipCurve(amount) {
-  // amount ~ 0.0..0.25 (this design uses ~0.02..0.14)
+  // amount ~ 0.0..0.25
   const n = 44100;
   const curve = new Float32Array(n);
-  const k = Math.max(0.0001, amount * 60);
+  const k = Math.max(0.0001, amount * 90); // stronger than before
   const norm = Math.tanh(k);
   for (let i = 0; i < n; i++) {
     const x = (i * 2) / n - 1;
@@ -447,7 +483,7 @@ function makeSoftClipCurve(amount) {
 }
 
 // Default visuals
-(function initUI(){
+(function initUI() {
   setStatus("STANDBY");
   stateReadoutEl.textContent = "FIELD STABLE";
 })();
