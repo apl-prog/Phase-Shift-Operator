@@ -2,11 +2,14 @@
 // One looped stem (Mass). Subtle autonomous drift + obvious temporary "stress" on interaction.
 // Fixes brightening over time by damping the delay feedback loop.
 // Makes interaction more unstable: motion shock + flutter + pitch wobble + stronger drive.
+// Adds a 3s fade-in on Play (and a short fade-out on Pause) so playback is not jarring.
 
 const FILE = "audio/mass.m4a";
 
 // Timing
 const RAMP = 0.06;
+const START_FADE_SECONDS = 3.0;
+const STOP_FADE_SECONDS = 0.25;
 
 // Base tuning (subtle)
 const BASE = {
@@ -138,7 +141,7 @@ async function fetchDecode(url) {
 function buildGraph() {
   // Master
   const master = audioCtx.createGain();
-  master.gain.value = BASE.gain;
+  master.gain.value = 0.0; // fade in on play
   master.connect(audioCtx.destination);
 
   // Stereo -> Mono crossfade
@@ -273,6 +276,20 @@ function buildSource() {
   source = s;
 }
 
+function fadeMasterIn() {
+  const t0 = audioCtx.currentTime;
+  nodes.master.gain.cancelScheduledValues(t0);
+  nodes.master.gain.setValueAtTime(0.0001, t0);
+  nodes.master.gain.exponentialRampToValueAtTime(BASE.gain, t0 + START_FADE_SECONDS);
+}
+
+function fadeMasterOut() {
+  const t0 = audioCtx.currentTime;
+  nodes.master.gain.cancelScheduledValues(t0);
+  nodes.master.gain.setValueAtTime(Math.max(0.0001, nodes.master.gain.value), t0);
+  nodes.master.gain.exponentialRampToValueAtTime(0.0001, t0 + STOP_FADE_SECONDS);
+}
+
 function togglePlay() {
   if (!isReady) return;
 
@@ -280,6 +297,10 @@ function togglePlay() {
     if (audioCtx.state === "suspended") audioCtx.resume();
 
     buildSource();
+
+    // ensure master starts silent then fades up
+    fadeMasterIn();
+
     source.start(audioCtx.currentTime + 0.02);
 
     isPlaying = true;
@@ -287,7 +308,15 @@ function togglePlay() {
     setStatus("RUNNING");
     specEl.innerHTML = specEl.innerHTML.replace(/STATUS:\s*\w+/i, "STATUS: RUNNING");
   } else {
-    try { source.stop(); } catch {}
+    // fade down before stopping to avoid clicks
+    fadeMasterOut();
+
+    const stopDelayMs = Math.ceil(STOP_FADE_SECONDS * 1000) + 30;
+    const s = source;
+    setTimeout(() => {
+      try { s?.stop(); } catch {}
+    }, stopDelayMs);
+
     source = null;
 
     isPlaying = false;
@@ -473,7 +502,7 @@ function makeSoftClipCurve(amount) {
   // amount ~ 0.0..0.25
   const n = 44100;
   const curve = new Float32Array(n);
-  const k = Math.max(0.0001, amount * 90); // stronger than before
+  const k = Math.max(0.0001, amount * 90);
   const norm = Math.tanh(k);
   for (let i = 0; i < n; i++) {
     const x = (i * 2) / n - 1;
