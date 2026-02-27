@@ -22,6 +22,11 @@ body{
     radial-gradient(900px 700px at 70% 90%, rgba(20,24,27,0.1), transparent 55%),
     linear-gradient(180deg, var(--bg), var(--bg2));
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+
+  /* Prevent iOS rubber-band scroll during interaction */
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* Subtle grain */
@@ -61,6 +66,11 @@ h1{ font-size:22px; margin:0; letter-spacing:0.2px; }
   display:block;
   animation: slowRotate 170s linear infinite;
   transform-origin: 50% 50%;
+
+  /* Critical: prevents Safari from scrolling page while dragging */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 @keyframes slowRotate{
@@ -103,7 +113,7 @@ h1{ font-size:22px; margin:0; letter-spacing:0.2px; }
 
 .stress-sheen{
   fill: rgba(255, 107, 61, 0.22);
-  opacity: 0; /* driven by JS */
+  opacity: 0;
   pointer-events:none;
   transition: opacity 120ms linear;
 }
